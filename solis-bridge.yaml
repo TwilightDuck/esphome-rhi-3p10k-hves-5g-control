@@ -1,0 +1,378 @@
+substitutions:
+  devicename: solis-control-bridge
+  friendly_name: Solis Control Bridge
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendly_name}
+  project:
+    name: nick.solis-control-bridge
+    version: 1.0.0
+  on_boot:
+    priority: -10
+    then:
+      - script.execute: solis_stop_all_overrides
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+  logs:
+    canbus: ERROR
+    sensor: ERROR
+    text_sensor: ERROR
+    number: ERROR
+    switch: ERROR
+    modbus_controller: ERROR
+    modbus: ERROR
+    component: ERROR
+    solis: INFO
+
+api:
+  encryption:
+    key: !secret api_noise_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Solis Control Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+
+uart:
+  - id: modbus_uart
+    tx_pin: 0
+    rx_pin: 1
+    baud_rate: 9600
+    stop_bits: 1
+
+modbus:
+  - id: solis_modbus
+    uart_id: modbus_uart
+    flow_control_pin: 3
+    send_wait_time: 500ms
+
+modbus_controller:
+  - id: solis_inverter
+    address: 0x01
+    modbus_id: solis_modbus
+    setup_priority: -10
+    command_throttle: 200ms
+    max_cmd_retries: 5
+    update_interval: 5s
+
+globals:
+  # 0 = Self-Use, 1 = Charge, 2 = Discharge, 3 = Hold
+  - id: manual_mode_active
+    type: int
+    restore_value: false
+    initial_value: "0"
+
+binary_sensor:
+  - platform: status
+    name: "Status"
+
+  - platform: template
+    name: "Solis In Zero Export"
+    id: solis_in_zero_export
+    internal: true
+
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  # Battery voltage used for charge/discharge power target conversion
+  - platform: modbus_controller
+    modbus_controller_id: solis_inverter
+    id: solis_battery_voltage
+    name: "Solis Battery Voltage"
+    address: 33133
+    register_type: read
+    value_type: U_WORD
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: solis_inverter
+    name: "Solis Battery SOC"
+    address: 33139
+    register_type: read
+    value_type: U_WORD
+    unit_of_measurement: "%"
+
+  - platform: modbus_controller
+    modbus_controller_id: solis_inverter
+    name: "Solis Battery Power"
+    address: 33149
+    register_type: read
+    value_type: S_DWORD
+    unit_of_measurement: W
+
+  - platform: modbus_controller
+    modbus_controller_id: solis_inverter
+    name: "Solis PV Total Power"
+    address: 33057
+    register_type: read
+    value_type: U_DWORD
+    unit_of_measurement: W
+
+  - platform: modbus_controller
+    modbus_controller_id: solis_inverter
+    name: "Solis Meter Total Power"
+    address: 33263
+    register_type: read
+    value_type: S_DWORD
+    unit_of_measurement: W
+
+  - platform: modbus_controller
+    modbus_controller_id: solis_inverter
+    name: "Solis House Load Power"
+    address: 33147
+    register_type: read
+    value_type: U_WORD
+    unit_of_measurement: W
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    ssid:
+      name: "Connected SSID"
+    mac_address:
+      name: "MAC Address"
+
+  - platform: version
+    name: "ESPHome Version"
+
+  - platform: template
+    name: "Solis Mode"
+    id: solis_mode
+    lambda: |-
+      int mode = id(manual_mode_active);
+      if (mode == 1) return std::string("Charging");
+      if (mode == 2) return std::string("Discharging");
+      if (mode == 3) return std::string("Holding");
+      return std::string("Self-Use");
+    update_interval: 1s
+
+button:
+  - platform: restart
+    name: "Restart"
+
+  - platform: template
+    name: "Solis Self-Use"
+    id: solis_self_use_btn
+    on_press:
+      - then:
+          - lambda: |-
+              id(solis_stop_all_overrides)->execute();
+              ESP_LOGI("solis", "Entering Self-Use mode...");
+
+switch:
+  - platform: template
+    name: "Solis Force Charge"
+    id: solis_force_charge
+    lambda: "return id(manual_mode_active) == 1;"
+    turn_on_action:
+      - lambda: |-
+          if (id(solis_manual_amps)->state < 0.5f) {
+            ESP_LOGW("solis", "Force Charge blocked: target current is 0A");
+            id(solis_force_charge)->publish_state(false);
+            return;
+          }
+          id(manual_mode_active) = 1;
+          id(solis_force_discharge)->publish_state(false);
+          id(solis_apply_manual_settings)->execute();
+    turn_off_action:
+      - lambda: |-
+          if (id(manual_mode_active) == 1) {
+             id(solis_stop_all_overrides)->execute();
+          }
+
+  - platform: template
+    name: "Solis Force Discharge"
+    id: solis_force_discharge
+    lambda: "return id(manual_mode_active) == 2;"
+    turn_on_action:
+      - lambda: |-
+          if (id(solis_manual_amps)->state < 0.5f) {
+            ESP_LOGW("solis", "Force Discharge blocked: target current is 0A");
+            id(solis_force_discharge)->publish_state(false);
+            return;
+          }
+          id(manual_mode_active) = 2;
+          id(solis_force_charge)->publish_state(false);
+          id(solis_apply_manual_settings)->execute();
+    turn_off_action:
+      - lambda: |-
+          if (id(manual_mode_active) == 2) {
+             id(solis_stop_all_overrides)->execute();
+          }
+
+  - platform: template
+    name: "Solis Battery Hold"
+    id: solis_battery_hold
+    lambda: "return id(manual_mode_active) == 3;"
+    turn_on_action:
+      - lambda: |-
+          id(solis_manual_amps)->publish_state(0.0f);
+          id(manual_mode_active) = 3;
+          id(solis_force_charge)->publish_state(false);
+          id(solis_force_discharge)->publish_state(false);
+          id(solis_apply_manual_settings)->execute();
+    turn_off_action:
+      - lambda: |-
+          if (id(manual_mode_active) == 3) {
+             id(solis_stop_all_overrides)->execute();
+          }
+
+  - platform: template
+    name: "Solis Zero Export"
+    id: solis_zero_export
+    lambda: "return id(solis_in_zero_export).state;"
+    turn_on_action:
+      - lambda: |-
+          id(solis_in_zero_export)->publish_state(true);
+          auto *modbus = id(solis_inverter);
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43072, 1));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43074, 0));
+          ESP_LOGI("solis", "Zero Export ENABLED (mode+limit write 1/2)");
+      - delay: 1s
+      - lambda: |-
+          auto *modbus = id(solis_inverter);
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43072, 1));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43074, 0));
+          ESP_LOGI("solis", "Zero Export ENABLED (mode+limit write 2/2)");
+    turn_off_action:
+      - lambda: |-
+          id(solis_in_zero_export)->publish_state(false);
+          auto *modbus = id(solis_inverter);
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43072, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43074, 20000));
+          ESP_LOGI("solis", "Zero Export DISABLED (mode+restore write 1/2)");
+      - delay: 1s
+      - lambda: |-
+          auto *modbus = id(solis_inverter);
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43072, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43074, 20000));
+          ESP_LOGI("solis", "Zero Export DISABLED (mode+restore write 2/2)");
+
+number:
+  - platform: template
+    name: "Solis Manual Amps"
+    id: solis_manual_amps
+    min_value: 0
+    max_value: 25
+    step: 1
+    unit_of_measurement: "A"
+    optimistic: true
+    set_action:
+      - lambda: |-
+          float val = x;
+          id(solis_manual_amps)->publish_state(val);
+          if (id(manual_mode_active) != 0 && id(manual_mode_active) != 3) {
+             id(solis_apply_manual_settings)->execute();
+          }
+
+script:
+  - id: solis_apply_manual_settings
+    mode: restart
+    then:
+      - script.stop: solis_stop_all_overrides
+      - lambda: |-
+          int mode = id(manual_mode_active);
+          float target = id(solis_manual_amps)->state;
+          uint16_t target_val = (uint16_t)(target * 10.0f);
+          auto *modbus = id(solis_inverter);
+
+          float voltage = id(solis_battery_voltage).state;
+          if (std::isnan(voltage) || voltage < 40.0f) voltage = 52.0f;
+          float watts = target * voltage;
+          uint16_t power_limit_val = (uint16_t)(watts / 10.0f);
+
+          if (mode == 1) {
+             ESP_LOGI("solis", "Force Charge ACTIVATED: %uA", (uint16_t)target);
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43110, 0x0023));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43117, target_val));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43130, power_limit_val));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43115, 0));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43114, 1));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43707, 1));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43141, target_val));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43135, 1));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43136, power_limit_val));
+          } else if (mode == 2) {
+             ESP_LOGI("solis", "Force Discharge ACTIVATED: %uA", (uint16_t)target);
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43110, 0x0023));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43147, 0));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43148, 0));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43149, 23));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43150, 59));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43142, target_val));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43118, target_val));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43131, power_limit_val));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43750, 15));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43115, 1));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43114, 1));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43135, 2));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43129, power_limit_val));
+          } else if (mode == 3) {
+             ESP_LOGI("solis", "Battery Hold ACTIVATED (0A)");
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43110, 0x0023));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43117, 0));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43118, 0));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43130, 0));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43131, 0));
+             modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43114, 1));
+          }
+
+  - id: solis_stop_all_overrides
+    mode: restart
+    then:
+      - lambda: |-
+          auto *modbus = id(solis_inverter);
+
+          id(solis_manual_amps)->publish_state(0.0f);
+          id(manual_mode_active) = 0;
+          id(solis_force_charge)->publish_state(false);
+          id(solis_force_discharge)->publish_state(false);
+          id(solis_battery_hold)->publish_state(false);
+          id(solis_in_zero_export)->publish_state(false);
+
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43707, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43141, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43142, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43072, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43074, 20000));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43135, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43136, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43129, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43130, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43131, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43114, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43115, 0));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43116, 250));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43117, 250));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43118, 250));
+          modbus->queue_command(esphome::modbus_controller::ModbusCommandItem::create_write_single_command(modbus, 43110, 0x0023));
+
+          ESP_LOGI("solis", "Manual Control STOPPED: Returning to Self-Use.");
