@@ -4,7 +4,7 @@ This repository is optimized for LLM-assisted maintenance.
 
 ## Goals
 
-- Keep Solis control behavior stable and predictable.
+- Keep Solis RHI-3P10K-HVES-5G control behavior stable and predictable.
 - Make register-level intent explicit.
 - Avoid broad refactors unless requested.
 
@@ -23,7 +23,7 @@ This repository is optimized for LLM-assisted maintenance.
 At minimum, run:
 
 ```bash
-esphome config solis-bridge.yaml
+esphome config rhi-3p10k-hves-5g-bridge.yaml
 ```
 
 If hardware is available, verify in Home Assistant:

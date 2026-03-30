@@ -1,6 +1,6 @@
-# ESPHome Solis Control
+# ESPHome RHI-3P10K-HVES-5G Control
 
-Solis-only ESPHome bridge for Modbus RTU control and telemetry.
+ESPHome bridge for Modbus RTU control and telemetry, focused on the Solis RHI-3P10K-HVES-5G.
 
 This repository intentionally excludes Batrium BMS integration and focuses on:
 - manual force charge/discharge controls
@@ -10,11 +10,11 @@ This repository intentionally excludes Batrium BMS integration and focuses on:
 
 ## Why this repo exists
 
-This project is a clean, publishable Solis control implementation extracted from a larger mixed integration. It is designed to be easy to understand, modify, and operate with LLM coding agents.
+This project is a clean, publishable control implementation extracted from a larger mixed integration. It is designed to be easy to understand, modify, and operate with LLM coding agents.
 
 ## Features
 
-- Solis RS485 Modbus RTU integration (ESP32 + MAX485)
+- Solis RHI-3P10K-HVES-5G RS485 Modbus RTU integration (ESP32 + MAX485)
 - Force Charge / Force Discharge switches
 - Battery Hold switch (resets manual amps to 0A)
 - Zero Export switch (writes both enable and backflow limit registers)
@@ -25,9 +25,9 @@ This project is a clean, publishable Solis control implementation extracted from
 
 - ESP32-C3 (or compatible ESP32 board)
 - MAX485 (or equivalent RS485 transceiver)
-- RS485 A/B wiring to Solis inverter communication bus
+- RS485 A/B wiring to Solis RHI-3P10K-HVES-5G communication bus
 
-Default pin mapping in `solis-bridge.yaml`:
+Default pin mapping in `rhi-3p10k-hves-5g-bridge.yaml`:
 - TX: GPIO0
 - RX: GPIO1
 - DE/RE: GPIO3
@@ -45,29 +45,33 @@ cp secrets.example.yaml secrets.yaml
 3. Validate config:
 
 ```bash
-esphome config solis-bridge.yaml
+esphome config rhi-3p10k-hves-5g-bridge.yaml
 ```
 
 4. Flash and run:
 
 ```bash
-esphome run solis-bridge.yaml
+esphome run rhi-3p10k-hves-5g-bridge.yaml
 ```
 
 ## Control Behavior
 
-- `Solis Manual Amps`: 0-25A target for force modes
-- `Solis Force Charge`: applies charge-related control registers
-- `Solis Force Discharge`: applies discharge-related control registers
-- `Solis Battery Hold`: sets amps to 0A and applies hold registers
-- `Solis Zero Export`:
+- `Manual Amps`: 0-25A target for force modes
+- `Force Charge`: applies charge-related control registers
+- `Force Discharge`: applies discharge-related control registers
+- `Battery Hold`: sets amps to 0A and applies hold registers
+- `Zero Export`:
   - ON: writes `43072=1`, `43074=0`
   - OFF: writes `43072=0`, `43074=20000`
-- `Solis Self-Use` and boot reset also clear manual control and zero export state
+- `Self-Use` and boot reset also clear manual control and zero export state
 
 ## Register Notes
 
-The implementation uses practical register behavior tested against Solis hybrid inverter control paths.
+The implementation uses practical register behavior tested against Solis RHI-3P10K-HVES-5G control paths.
+
+Compatibility note:
+- Confirmed working on **Solis RHI-3P10K-HVES-5G**
+- May work on related Solis hybrid models, but that is not guaranteed
 
 Key writes used here:
 - `43072`: zero export enable
